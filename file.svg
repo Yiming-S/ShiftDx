@@ -1,0 +1,75 @@
+<svg viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Gradients for Source Domains (EEG Waves) -->
+    <linearGradient id="grad-source1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="grad-source2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#8B5CF6"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+    <linearGradient id="grad-source3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#F43F5E"/>
+      <stop offset="100%" stop-color="#D946EF"/>
+    </linearGradient>
+    
+    <!-- Gradient for Target Domain (Benchmark Ring) -->
+    <linearGradient id="grad-target" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4F46E5"/>
+      <stop offset="100%" stop-color="#C084FC"/>
+    </linearGradient>
+    
+    <!-- Premium SaaS Drop Shadow -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#000000" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <!-- Background Base Lines (representing separate source domains) -->
+  <line x1="15" y1="140" x2="180" y2="140" stroke="#CBD5E1" stroke-width="2.5" stroke-dasharray="6 6" stroke-linecap="round"/>
+  <line x1="15" y1="250" x2="180" y2="250" stroke="#CBD5E1" stroke-width="2.5" stroke-dasharray="6 6" stroke-linecap="round"/>
+  <line x1="15" y1="360" x2="180" y2="360" stroke="#CBD5E1" stroke-width="2.5" stroke-dasharray="6 6" stroke-linecap="round"/>
+
+  <!-- Adaptation Boundary Line (Benchmark Horizon) -->
+  <line x1="260" y1="90" x2="260" y2="410" stroke="#94A3B8" stroke-width="2" stroke-dasharray="4 6" stroke-linecap="round" opacity="0.6"/>
+
+  <!-- EEG Source Domain 3 (Bottom - Pink) -->
+  <path d="M 15 360 L 60 300 L 95 400 L 125 360 C 200 360, 240 250, 300 250" 
+        fill="none" stroke="url(#grad-source3)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow)" />
+        
+  <!-- EEG Source Domain 2 (Middle - Purple) -->
+  <path d="M 15 250 L 60 190 L 95 290 L 125 250 L 300 250" 
+        fill="none" stroke="url(#grad-source2)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow)" />
+
+  <!-- EEG Source Domain 1 (Top - Cyan) -->
+  <path d="M 15 140 L 60 80 L 95 180 L 125 140 C 200 140, 240 250, 300 250" 
+        fill="none" stroke="url(#grad-source1)" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow)" />
+
+  <!-- Electrode Nodes for Wave 3 -->
+  <circle cx="60" cy="300" r="7" fill="#FFFFFF" stroke="url(#grad-source3)" stroke-width="4.5"/>
+  <circle cx="95" cy="400" r="7" fill="#FFFFFF" stroke="url(#grad-source3)" stroke-width="4.5"/>
+  <circle cx="125" cy="360" r="7" fill="#FFFFFF" stroke="url(#grad-source3)" stroke-width="4.5"/>
+
+  <!-- Electrode Nodes for Wave 2 -->
+  <circle cx="60" cy="190" r="7" fill="#FFFFFF" stroke="url(#grad-source2)" stroke-width="4.5"/>
+  <circle cx="95" cy="290" r="7" fill="#FFFFFF" stroke="url(#grad-source2)" stroke-width="4.5"/>
+  <circle cx="125" cy="250" r="7" fill="#FFFFFF" stroke="url(#grad-source2)" stroke-width="4.5"/>
+
+  <!-- Electrode Nodes for Wave 1 -->
+  <circle cx="60" cy="80" r="7" fill="#FFFFFF" stroke="url(#grad-source1)" stroke-width="4.5"/>
+  <circle cx="95" cy="180" r="7" fill="#FFFFFF" stroke="url(#grad-source1)" stroke-width="4.5"/>
+  <circle cx="125" cy="140" r="7" fill="#FFFFFF" stroke="url(#grad-source1)" stroke-width="4.5"/>
+
+  <!-- Target Domain Benchmark Dial (Background Base) -->
+  <circle cx="380" cy="250" r="76" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="16" filter="url(#shadow)" />
+  
+  <!-- Target Domain Benchmark Dial (Foreground Score 75% Arc) -->
+  <!-- Starts exactly where the 3 waves merge, tracing a beautiful arc -->
+  <path d="M 304 250 A 76 76 0 1 1 380 326" 
+        fill="none" stroke="url(#grad-target)" stroke-width="16" stroke-linecap="round" />
+
+  <!-- Inner Benchmark Checkmark (Validation/Success) -->
+  <path d="M 350 255 L 370 275 L 410 220" 
+        fill="none" stroke="url(#grad-target)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

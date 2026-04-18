@@ -1,0 +1,11 @@
+from views import _1_overview as page_1_overview
+from views import _2_drift_trajectory as page_2_drift_trajectory
+from views import _3_claim1 as page_3_claim1
+from views import _4_claim2 as page_4_claim2
+from views import _5_claim3 as page_5_claim3
+from views import _6_claim4 as page_6_claim4
+from views import _7_subject as page_7_subject
+from views import _8_live_da as page_8_live_da
+from views import _9_multi_metric as page_9_multi_metric
+from views import _10_sweep as page_10_sweep
+from views import _11_detection as page_11_detection
