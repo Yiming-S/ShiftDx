@@ -1,5 +1,7 @@
 """Page 3: Claim 1 — Drift Predicts Performance Loss."""
 
+from io import StringIO
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -12,7 +14,7 @@ from utils import FEATURE_COLORS, filter_by_dataset, format_acc, style_figure
 @st.cache_data
 def _fit_claim1(df_json: str) -> dict:
     """Fit the baseline-centered mixed-effects model from the paper (Table 1)."""
-    df = pd.read_json(df_json, orient="split")
+    df = pd.read_json(StringIO(df_json), orient="split")
     if df.empty or df["subject"].nunique() < 2:
         return {"error": "Not enough groups to fit mixed-effects model."}
     # Treat subject as grouping variable (random intercept)

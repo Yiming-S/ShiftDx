@@ -1,5 +1,7 @@
 """Page 4: Claim 2 — DA Benefit Decomposition."""
 
+from io import StringIO
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -11,7 +13,7 @@ from utils import FEATURE_COLORS, filter_by_dataset, style_figure
 
 @st.cache_data
 def _fit_claim2(df_json: str) -> dict:
-    df = pd.read_json(df_json, orient="split")
+    df = pd.read_json(StringIO(df_json), orient="split")
     if df.empty or df["subject"].nunique() < 2:
         return {"error": "Not enough groups."}
     df = df.copy()
