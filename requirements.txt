@@ -13,7 +13,11 @@ moabb>=1.0
 mne>=1.6
 
 # DA4BCI powers DA Lab pages + build_moabb.py.
-# Install locally from your clone:
+# For local dev you can also install from your clone:
 #   pip install -e /path/to/DA4BCI-Python
-# or from git once public:
-# da4bci @ git+https://github.com/Yiming-S/DA4BCI-Python.git
+da4bci @ git+https://github.com/Yiming-S/DA4BCI-Python.git
+
+# CrossPython supplies feature / classifier code reused by the build script.
+# If the build script isn't run in the deployment (only the dashboard reads the
+# pre-built CSVs), this line can stay commented out.
+# crosspython @ git+https://github.com/Yiming-S/CrossPython.git
