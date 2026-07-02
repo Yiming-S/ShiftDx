@@ -1,16 +1,22 @@
-streamlit>=1.36
-plotly>=5.18
-pandas>=2.0
-numpy>=1.24
-scipy>=1.10
-scikit-learn>=1.3
-statsmodels>=0.14
-matplotlib>=3.7
-POT>=0.9
+# Upper bounds pin the verified major versions so a future major release of
+# Streamlit/pandas/numpy can't silently break caching or rendering.
+streamlit>=1.36,<2
+plotly>=5.18,<7
+pandas>=2.0,<3
+numpy>=1.24,<3
+scipy>=1.10,<2
+scikit-learn>=1.3,<2
+statsmodels>=0.14,<1
+matplotlib>=3.7,<4
+POT>=0.9,<1
 
 # Build script only (not needed for running the dashboard on cached CSVs)
 moabb>=1.0
 mne>=1.6
+
+# Dev / test only (run `pytest TEST/`)
+pytest>=7.0
+joblib>=1.2
 
 # DA4BCI powers DA Lab pages + build_moabb.py.
 # For local dev you can also install from your clone:

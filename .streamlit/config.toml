@@ -1,0 +1,19 @@
+# ShiftDx Streamlit configuration.
+# Pins the brand light theme so the deployed appearance is deterministic and
+# matches the hardcoded CSS in app.py. Dark mode is intentionally not enabled
+# here (the CSS assumes light); a colorblind-safe palette toggle is offered
+# in-app instead.
+
+[theme]
+base = "light"
+primaryColor = "#4F46E5"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"
+textColor = "#1E293B"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

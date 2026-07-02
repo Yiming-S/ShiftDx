@@ -9,3 +9,6 @@ from views import _8_live_da as page_8_live_da
 from views import _9_multi_metric as page_9_multi_metric
 from views import _10_sweep as page_10_sweep
 from views import _11_detection as page_11_detection
+from views import _12_da_leaderboard as page_12_da_leaderboard
+from views import _13_global_report as page_13_global_report
+from views import _14_data_quality as page_14_data_quality

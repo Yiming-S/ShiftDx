@@ -21,10 +21,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 import warnings
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -59,7 +61,13 @@ try:
     # CNT reader; bnci004/stieger2021 via MOABB LeftRightImagery(fmin=8, fmax=35))
     from CrossPython.core.workers import _load_subject_sessions as _cp_load
 except ImportError as exc:
-    sys.exit(f"ERROR: CrossPython not importable (set $CROSSPYTHON_ROOT).\n{exc}")
+    sys.exit(
+        "ERROR: CrossPython is required to BUILD datasets but is not importable.\n"
+        f"  Set CROSSPYTHON_ROOT=/path/to/CrossPython (currently '{CROSSPYTHON_ROOT}').\n"
+        "  The dashboard itself does NOT need CrossPython — it only reads the\n"
+        "  pre-built CSVs in data/. This script regenerates them.\n"
+        f"  Underlying error: {exc}"
+    )
 
 # ---------------------------------------------------------------------------
 # DA4BCI — DA methods + distance metrics
@@ -267,12 +275,160 @@ def _apply_da(source: np.ndarray, target: np.ndarray, method: str,
 
 
 # ---------------------------------------------------------------------------
+# Per-subject worker (module-level so it is picklable for joblib.Parallel)
+# ---------------------------------------------------------------------------
+
+def _process_subject(subj, dataset_key, methods, classifiers,
+                     clf_params_map, feat_params_map):
+    """Process one subject end-to-end. Returns (drift_rows, eval_rows,
+    merged_rows). Deterministic (fixed CV seed), so parallel == serial."""
+    drift_rows, eval_rows, merged_rows = [], [], []
+    print(f"\n== subject {subj} ==")
+    t0 = time.perf_counter()
+    try:
+        sessions = _load_subject(
+            dataset_key, subj, data_dir=os.environ.get("MNE_DATA", ""),
+        )
+    except Exception as exc:
+        print(f"  skip subject {subj}: {exc}")
+        return drift_rows, eval_rows, merged_rows
+    if len(sessions) < 2:
+        print(f"  skip subject {subj}: only {len(sessions)} session(s)")
+        return drift_rows, eval_rows, merged_rows
+
+    n_sessions = len(sessions)
+    ref_ep, ref_lb = sessions[0]["epochs"], sessions[0]["labels"]
+
+    # ── Fit feature extractors ONCE per (subject, feature) ─────────────
+    ref_feats = {}
+    ref_objs = {}
+    for feat_name in ("CSP", "logvar", "TS"):
+        try:
+            feats, obj = extract_features_train(
+                ref_ep, ref_lb, feat_name, feat_params_map.get(feat_name, {}),
+            )
+            ref_feats[feat_name] = feats
+            ref_objs[feat_name] = obj
+        except Exception as exc:
+            print(f"  [WARN] {feat_name} extractor failed on S{subj}: {exc}")
+
+    # ── Baseline = 5-fold CV on session 0 per (feature, classifier) ────
+    baseline_by_fc: dict[tuple, float] = {}
+    for feat_name, ref_X in ref_feats.items():
+        for clf_name in classifiers:
+            acc0 = _retrain_cv(clf_name, clf_params_map[clf_name], ref_X, ref_lb)
+            baseline_by_fc[(feat_name, clf_name)] = acc0
+            eval_rows.append({
+                "ref_session": 0, "target_session": 0, "feature": feat_name,
+                "classifier": clf_name, "da": "none", "strategy": "retrain",
+                "accuracy": acc0, "subject": subj, "dataset": dataset_key,
+                "n_sessions": n_sessions,
+            })
+
+    # ── Per-target-session loop ────────────────────────────────────────
+    for k in range(1, n_sessions):
+        tgt_ep, tgt_lb = sessions[k]["epochs"], sessions[k]["labels"]
+
+        for feat_name, ref_X in ref_feats.items():
+            try:
+                tgt_X = extract_features_test(tgt_ep, ref_objs[feat_name], feat_name)
+            except Exception as exc:
+                print(f"  [WARN] extract_test {feat_name} failed k={k}: {exc}")
+                continue
+
+            # -- Distances (classifier-agnostic) ------------------------
+            dists = _five_distances(ref_X, tgt_X)
+            drift_rows.append({
+                "session_k": k, "feature": feat_name,
+                **dists,
+                "subject": subj, "dataset": dataset_key, "n_sessions": n_sessions,
+            })
+
+            # -- Pre-compute adapted features once per DA method --------
+            adapted: dict[str, tuple] = {}
+            for m in methods:
+                try:
+                    src_a, tgt_a, _rt = _apply_da(ref_X, tgt_X, m, source_labels=ref_lb)
+                    adapted[m] = (src_a, tgt_a)
+                except Exception as exc:
+                    print(f"  DA {m} failed S{subj}/k={k}/{feat_name}: {exc}")
+                    adapted[m] = (None, None)
+
+            # -- Loop over classifiers ----------------------------------
+            for clf_name in classifiers:
+                clf_params = clf_params_map[clf_name]
+                base_acc = baseline_by_fc[(feat_name, clf_name)]
+
+                # No DA
+                acc_noda = _fit_predict(clf_name, clf_params, ref_X, ref_lb, tgt_X, tgt_lb)
+                eval_rows.append({
+                    "ref_session": 0, "target_session": k, "feature": feat_name,
+                    "classifier": clf_name, "da": "none", "strategy": "train_once",
+                    "accuracy": acc_noda, "subject": subj, "dataset": dataset_key,
+                    "n_sessions": n_sessions,
+                })
+                merged_rows.append({
+                    "ref_session": 0, "target_session": k, "feature": feat_name,
+                    "classifier": clf_name, "da": "none", "strategy": "train_once",
+                    "accuracy": acc_noda, "subject": subj, "dataset": dataset_key,
+                    "n_sessions": n_sessions, **dists,
+                    "baseline_acc": base_acc,
+                    "acc_centered": acc_noda - base_acc if not np.isnan(base_acc) else np.nan,
+                    "uid": f"{dataset_key}_{subj}",
+                })
+
+                # DA (10 methods)
+                for m in methods:
+                    src_a, tgt_a = adapted[m]
+                    if src_a is None:
+                        acc_da = np.nan
+                    else:
+                        acc_da = _fit_predict(clf_name, clf_params, src_a, ref_lb, tgt_a, tgt_lb)
+                    eval_rows.append({
+                        "ref_session": 0, "target_session": k, "feature": feat_name,
+                        "classifier": clf_name, "da": m, "strategy": "train_once_da",
+                        "accuracy": acc_da, "subject": subj, "dataset": dataset_key,
+                        "n_sessions": n_sessions,
+                    })
+                    merged_rows.append({
+                        "ref_session": 0, "target_session": k, "feature": feat_name,
+                        "classifier": clf_name, "da": m, "strategy": "train_once_da",
+                        "accuracy": acc_da, "subject": subj, "dataset": dataset_key,
+                        "n_sessions": n_sessions, **dists,
+                        "baseline_acc": base_acc,
+                        "acc_centered": acc_da - base_acc if not np.isnan(base_acc) else np.nan,
+                        "uid": f"{dataset_key}_{subj}",
+                    })
+
+                # Retrain — refit extractor on target, then CV with clf.
+                acc_rt = _retrain_cv(clf_name, clf_params, tgt_X, tgt_lb)
+                eval_rows.append({
+                    "ref_session": k, "target_session": k, "feature": feat_name,
+                    "classifier": clf_name, "da": "none", "strategy": "retrain",
+                    "accuracy": acc_rt, "subject": subj, "dataset": dataset_key,
+                    "n_sessions": n_sessions,
+                })
+                merged_rows.append({
+                    "ref_session": k, "target_session": k, "feature": feat_name,
+                    "classifier": clf_name, "da": "none", "strategy": "retrain",
+                    "accuracy": acc_rt, "subject": subj, "dataset": dataset_key,
+                    "n_sessions": n_sessions, **dists,
+                    "baseline_acc": base_acc,
+                    "acc_centered": acc_rt - base_acc if not np.isnan(base_acc) else np.nan,
+                    "uid": f"{dataset_key}_{subj}",
+                })
+
+    print(f"  subject {subj} done in {time.perf_counter() - t0:.1f}s")
+    return drift_rows, eval_rows, merged_rows
+
+
+# ---------------------------------------------------------------------------
 # Main build loop
 # ---------------------------------------------------------------------------
 
 def build(dataset_key: str, subjects: list[int] | None = None,
           out_dir: str = DATA_DIR, slow_methods: bool = True,
-          classifiers: list[str] | None = None) -> None:
+          classifiers: list[str] | None = None, n_jobs: int = 1) -> None:
     if dataset_key not in MOABB_REGISTRY:
         raise ValueError(f"Unknown dataset '{dataset_key}'. Available: {list(MOABB_REGISTRY)}")
 
@@ -288,149 +444,26 @@ def build(dataset_key: str, subjects: list[int] | None = None,
     clf_params_map = {c: params["classifier"].get(c, {}) for c in classifiers}
     feat_params_map = params["feature"]
 
-    drift_rows, eval_rows, merged_rows = [], [], []
-
     t_global = time.perf_counter()
-    for subj in subjects:
-        print(f"\n== subject {subj} ==")
-        t0 = time.perf_counter()
-        try:
-            sessions = _load_subject(
-                dataset_key, subj,
-                data_dir=os.environ.get("MNE_DATA", ""),
-            )
-        except Exception as exc:
-            print(f"  skip subject {subj}: {exc}")
-            continue
-        if len(sessions) < 2:
-            print(f"  skip subject {subj}: only {len(sessions)} session(s)")
-            continue
+    if n_jobs and n_jobs != 1:
+        from joblib import Parallel, delayed
+        print(f"Processing {len(subjects)} subjects with n_jobs={n_jobs}…")
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_process_subject)(
+                subj, dataset_key, methods, classifiers,
+                clf_params_map, feat_params_map)
+            for subj in subjects)
+    else:
+        results = [
+            _process_subject(subj, dataset_key, methods, classifiers,
+                             clf_params_map, feat_params_map)
+            for subj in subjects]
 
-        n_sessions = len(sessions)
-        ref_ep, ref_lb = sessions[0]["epochs"], sessions[0]["labels"]
-
-        # ── Fit feature extractors ONCE per (subject, feature) ─────────────
-        ref_feats = {}
-        ref_objs = {}
-        for feat_name in ("CSP", "logvar", "TS"):
-            try:
-                feats, obj = extract_features_train(
-                    ref_ep, ref_lb, feat_name, feat_params_map.get(feat_name, {}),
-                )
-                ref_feats[feat_name] = feats
-                ref_objs[feat_name] = obj
-            except Exception as exc:
-                print(f"  [WARN] {feat_name} extractor failed on S{subj}: {exc}")
-
-        # ── Baseline = 5-fold CV on session 0 per (feature, classifier) ────
-        baseline_by_fc: dict[tuple, float] = {}
-        for feat_name, ref_X in ref_feats.items():
-            for clf_name in classifiers:
-                acc0 = _retrain_cv(clf_name, clf_params_map[clf_name], ref_X, ref_lb)
-                baseline_by_fc[(feat_name, clf_name)] = acc0
-                eval_rows.append({
-                    "ref_session": 0, "target_session": 0, "feature": feat_name,
-                    "classifier": clf_name, "da": "none", "strategy": "retrain",
-                    "accuracy": acc0, "subject": subj, "dataset": dataset_key,
-                    "n_sessions": n_sessions,
-                })
-
-        # ── Per-target-session loop ────────────────────────────────────────
-        for k in range(1, n_sessions):
-            tgt_ep, tgt_lb = sessions[k]["epochs"], sessions[k]["labels"]
-
-            for feat_name, ref_X in ref_feats.items():
-                try:
-                    tgt_X = extract_features_test(tgt_ep, ref_objs[feat_name], feat_name)
-                except Exception as exc:
-                    print(f"  [WARN] extract_test {feat_name} failed k={k}: {exc}")
-                    continue
-
-                # -- Distances (classifier-agnostic) ------------------------
-                dists = _five_distances(ref_X, tgt_X)
-                drift_rows.append({
-                    "session_k": k, "feature": feat_name,
-                    **dists,
-                    "subject": subj, "dataset": dataset_key, "n_sessions": n_sessions,
-                })
-
-                # -- Pre-compute adapted features once per DA method --------
-                adapted: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-                for m in methods:
-                    try:
-                        src_a, tgt_a, _rt = _apply_da(ref_X, tgt_X, m, source_labels=ref_lb)
-                        adapted[m] = (src_a, tgt_a)
-                    except Exception as exc:
-                        print(f"  DA {m} failed S{subj}/k={k}/{feat_name}: {exc}")
-                        adapted[m] = (None, None)
-
-                # -- Loop over classifiers ----------------------------------
-                for clf_name in classifiers:
-                    clf_params = clf_params_map[clf_name]
-                    base_acc = baseline_by_fc[(feat_name, clf_name)]
-
-                    # No DA
-                    acc_noda = _fit_predict(clf_name, clf_params, ref_X, ref_lb, tgt_X, tgt_lb)
-                    eval_rows.append({
-                        "ref_session": 0, "target_session": k, "feature": feat_name,
-                        "classifier": clf_name, "da": "none", "strategy": "train_once",
-                        "accuracy": acc_noda, "subject": subj, "dataset": dataset_key,
-                        "n_sessions": n_sessions,
-                    })
-                    merged_rows.append({
-                        "ref_session": 0, "target_session": k, "feature": feat_name,
-                        "classifier": clf_name, "da": "none", "strategy": "train_once",
-                        "accuracy": acc_noda, "subject": subj, "dataset": dataset_key,
-                        "n_sessions": n_sessions, **dists,
-                        "baseline_acc": base_acc,
-                        "acc_centered": acc_noda - base_acc if not np.isnan(base_acc) else np.nan,
-                        "uid": f"{dataset_key}_{subj}",
-                    })
-
-                    # DA (10 methods)
-                    for m in methods:
-                        src_a, tgt_a = adapted[m]
-                        if src_a is None:
-                            acc_da = np.nan
-                        else:
-                            acc_da = _fit_predict(clf_name, clf_params, src_a, ref_lb, tgt_a, tgt_lb)
-                        eval_rows.append({
-                            "ref_session": 0, "target_session": k, "feature": feat_name,
-                            "classifier": clf_name, "da": m, "strategy": "train_once_da",
-                            "accuracy": acc_da, "subject": subj, "dataset": dataset_key,
-                            "n_sessions": n_sessions,
-                        })
-                        merged_rows.append({
-                            "ref_session": 0, "target_session": k, "feature": feat_name,
-                            "classifier": clf_name, "da": m, "strategy": "train_once_da",
-                            "accuracy": acc_da, "subject": subj, "dataset": dataset_key,
-                            "n_sessions": n_sessions, **dists,
-                            "baseline_acc": base_acc,
-                            "acc_centered": acc_da - base_acc if not np.isnan(base_acc) else np.nan,
-                            "uid": f"{dataset_key}_{subj}",
-                        })
-
-                    # Retrain — refit extractor on target, then CV with clf.
-                    # To stay apples-to-apples with No-DA (same feature geometry),
-                    # we CV on the tgt features computed with ref's extractor.
-                    acc_rt = _retrain_cv(clf_name, clf_params, tgt_X, tgt_lb)
-                    eval_rows.append({
-                        "ref_session": k, "target_session": k, "feature": feat_name,
-                        "classifier": clf_name, "da": "none", "strategy": "retrain",
-                        "accuracy": acc_rt, "subject": subj, "dataset": dataset_key,
-                        "n_sessions": n_sessions,
-                    })
-                    merged_rows.append({
-                        "ref_session": k, "target_session": k, "feature": feat_name,
-                        "classifier": clf_name, "da": "none", "strategy": "retrain",
-                        "accuracy": acc_rt, "subject": subj, "dataset": dataset_key,
-                        "n_sessions": n_sessions, **dists,
-                        "baseline_acc": base_acc,
-                        "acc_centered": acc_rt - base_acc if not np.isnan(base_acc) else np.nan,
-                        "uid": f"{dataset_key}_{subj}",
-                    })
-
-        print(f"  subject {subj} done in {time.perf_counter() - t0:.1f}s")
+    drift_rows, eval_rows, merged_rows = [], [], []
+    for d_rows, e_rows, m_rows in results:
+        drift_rows.extend(d_rows)
+        eval_rows.extend(e_rows)
+        merged_rows.extend(m_rows)
 
     # ── Attach drift_z to merged rows (within dataset × feature × classifier) ──
     merged_df = pd.DataFrame(merged_rows)
@@ -460,11 +493,35 @@ def build(dataset_key: str, subjects: list[int] | None = None,
     eval_df.to_csv(eval_path, index=False)
     merged_df.to_csv(merged_path, index=False)
 
+    # ── Build manifest (provenance surfaced on the Overview page) ────────────
+    try:
+        import da4bci as _da4bci
+        da4bci_version = getattr(_da4bci, "__version__", "?")
+    except Exception:
+        da4bci_version = "?"
+    manifest = {
+        "dataset": dataset_key,
+        "build_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "subjects": list(subjects),
+        "n_subjects": len(subjects),
+        "classifiers": classifiers,
+        "da_methods": methods,
+        "slow_methods": slow_methods,
+        "n_jobs": n_jobs,
+        "da4bci_version": da4bci_version,
+        "rows": {"drift": int(len(drift_df)), "eval": int(len(eval_df)),
+                 "merged": int(len(merged_df))},
+    }
+    manifest_path = os.path.join(out_dir, f"build_manifest_{dataset_key}.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
     dt_all = time.perf_counter() - t_global
     print(f"\nDone in {dt_all / 60:.1f} min. Wrote:")
     print(f"  {drift_path}   ({len(drift_df):,} rows)")
     print(f"  {eval_path}    ({len(eval_df):,} rows)")
     print(f"  {merged_path}  ({len(merged_df):,} rows)")
+    print(f"  {manifest_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +541,9 @@ def _parse_args():
     ap.add_argument("--mne-data-dir", default=None)
     ap.add_argument("--no-slow", action="store_true",
                     help="Skip MIDA and M3D (much faster).")
+    ap.add_argument("--n-jobs", type=int, default=1,
+                    help="Parallelize the per-subject loop via joblib "
+                         "(default 1 = serial; results are identical).")
     return ap.parse_args()
 
 
@@ -491,7 +551,12 @@ if __name__ == "__main__":
     args = _parse_args()
     if args.mne_data_dir:
         import mne
-        mne.set_config("MNE_DATA", os.path.abspath(args.mne_data_dir))
-        print(f"MNE_DATA set to: {os.path.abspath(args.mne_data_dir)}")
+        abs_dir = os.path.abspath(args.mne_data_dir)
+        mne.set_config("MNE_DATA", abs_dir)
+        # Also export to the environment: the CrossPython loader path reads
+        # os.environ['MNE_DATA'], which mne.set_config alone does not populate.
+        os.environ["MNE_DATA"] = abs_dir
+        print(f"MNE_DATA set to: {abs_dir}")
     build(args.dataset, subjects=args.subjects, out_dir=args.out_dir,
-          slow_methods=not args.no_slow, classifiers=args.classifiers)
+          slow_methods=not args.no_slow, classifiers=args.classifiers,
+          n_jobs=args.n_jobs)

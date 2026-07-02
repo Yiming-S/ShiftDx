@@ -1,6 +1,6 @@
 """Page 3: Claim 1 — Drift Predicts Performance Loss."""
 
-from io import StringIO
+import logging
 
 import numpy as np
 import pandas as pd
@@ -8,17 +8,25 @@ import plotly.graph_objects as go
 import streamlit as st
 import statsmodels.formula.api as smf
 
-from utils import FEATURE_COLORS, filter_by_dataset, format_acc, style_figure
+from utils import (
+    CLASSIFIER_LABEL, DISTANCE_LABEL, DRIFT_Z_COL,
+    SIG_LEGEND, about_page, apply_ctx_classifier, apply_ctx_dataset,
+    apply_ctx_metric, benjamini_hochberg, download_bar, empty_state,
+    feature_colors, get_ctx, mixedlm_pseudo_r2, pvalue_badge, style_figure,
+)
+
+logger = logging.getLogger(__name__)
 
 
-@st.cache_data
-def _fit_claim1(df_json: str) -> dict:
-    """Fit the baseline-centered mixed-effects model from the paper (Table 1)."""
-    df = pd.read_json(StringIO(df_json), orient="split")
+@st.cache_data(show_spinner=False)
+def _fit_claim1(df: pd.DataFrame) -> dict:
+    """Fit the baseline-centered mixed-effects model from the paper (Table 1).
+
+    Cached directly on the DataFrame (Streamlit hashes it natively). The model
+    formula and fit method are unchanged from the published analysis.
+    """
     if df.empty or df["subject"].nunique() < 2:
         return {"error": "Not enough groups to fit mixed-effects model."}
-    # Treat subject as grouping variable (random intercept)
-    # Use categorical feature/dataset for fixed effects
     df = df.copy()
     df["feature"] = df["feature"].astype("category")
     df["dataset"] = df["dataset"].astype("category")
@@ -26,76 +34,154 @@ def _fit_claim1(df_json: str) -> dict:
     try:
         model = smf.mixedlm(
             "acc_centered ~ drift_z * C(feature) + C(dataset)",
-            data=df,
-            groups=df["subject_tag"],
+            data=df, groups=df["subject_tag"],
         )
         result = model.fit(method="lbfgs", disp=False)
     except Exception as exc:
         return {"error": f"MixedLM fit failed: {exc}"}
 
-    coef = result.params.to_dict()
-    pval = result.pvalues.to_dict()
-    se = result.bse.to_dict()
-    tval = result.tvalues.to_dict()
     rows = []
-    for k in coef:
+    for k in result.params.index:
         rows.append({
             "term": k,
-            "coef": coef[k],
-            "SE": se.get(k, np.nan),
-            "t": tval.get(k, np.nan),
-            "p": pval.get(k, np.nan),
+            "coef": result.params[k],
+            "SE": result.bse.get(k, np.nan),
+            "t": result.tvalues.get(k, np.nan),
+            "p": result.pvalues.get(k, np.nan),
         })
-    return {"table": pd.DataFrame(rows), "n": int(len(df)), "n_subj": int(df["subject_tag"].nunique())}
+    r2m, r2c = mixedlm_pseudo_r2(result)
+    return {
+        "table": pd.DataFrame(rows),
+        "n": int(len(df)),
+        "n_subj": int(df["subject_tag"].nunique()),
+        "r2_marginal": r2m,
+        "r2_conditional": r2c,
+    }
 
 
-def render(store, dataset):
-    st.header("Claim 1 — Drift Predicts Performance Loss")
+@st.cache_data(show_spinner=False)
+def _fit_random_slope(df: pd.DataFrame) -> dict:
+    """SUPPLEMENTARY random-slope MixedLM (re_formula='~drift_z').
+
+    NOT the published model — offered only as a robustness panel. Convergence
+    with few subjects per dataset is fragile, hence the explicit status flag.
+    """
+    if df.empty or df["subject"].nunique() < 2:
+        return {"error": "Not enough groups."}
+    df = df.copy()
+    df["feature"] = df["feature"].astype("category")
+    df["dataset"] = df["dataset"].astype("category")
+    df["subject_tag"] = df["dataset"].astype(str) + "_" + df["subject"].astype(str)
+    try:
+        model = smf.mixedlm(
+            "acc_centered ~ drift_z * C(feature) + C(dataset)",
+            data=df, groups=df["subject_tag"], re_formula="~drift_z",
+        )
+        result = model.fit(method="lbfgs", disp=False)
+    except Exception as exc:
+        return {"error": f"Random-slope fit failed: {exc}"}
+    rows = [{"term": k, "coef": result.params[k], "SE": result.bse.get(k, np.nan),
+             "p": result.pvalues.get(k, np.nan)} for k in result.params.index]
+    return {"table": pd.DataFrame(rows),
+            "converged": bool(getattr(result, "converged", True))}
+
+
+@st.cache_data(show_spinner=False)
+def _build_forest(raw_noda: pd.DataFrame) -> tuple:
+    """Per-(feature × classifier × metric) OLS drift slopes with BH-FDR.
+
+    The FDR correction is computed over the FULL set of fitted cells (the true
+    multiplicity), before any display filtering. Returns (forest_df, skipped).
+    """
+    forest_rows = []
+    skipped = 0
+    for (feat, clf), g in raw_noda.groupby(["feature", "classifier"]):
+        for m_col, z_col in DRIFT_Z_COL.items():
+            if z_col not in g.columns:
+                continue
+            gg = g.dropna(subset=[z_col, "acc_centered"])
+            if len(gg) < 5:
+                skipped += 1
+                continue
+            try:
+                mod = smf.ols(f"acc_centered ~ {z_col}", data=gg).fit()
+                beta = mod.params[z_col]
+                se = mod.bse[z_col]
+                p = mod.pvalues[z_col]
+                r2 = mod.rsquared
+                ci = mod.conf_int(alpha=0.05).loc[z_col].values
+            except Exception as exc:
+                logger.debug("forest OLS failed for %s/%s/%s: %s",
+                             feat, clf, m_col, exc)
+                skipped += 1
+                continue
+            forest_rows.append({
+                "feature": feat, "classifier": clf, "metric": m_col,
+                "metric_label": DISTANCE_LABEL[m_col], "n": len(gg),
+                "beta": beta, "se": se, "lo": ci[0], "hi": ci[1],
+                "p": p, "R2": r2,
+            })
+    fdf = pd.DataFrame(forest_rows)
+    if not fdf.empty:
+        fdf["p_adj"] = benjamini_hochberg(fdf["p"].to_numpy())
+        fdf["sig_fdr"] = fdf["p_adj"] < 0.05
+    return fdf, skipped
+
+
+def render(store):
+    ctx = get_ctx()
+    fcolors = feature_colors()
+
+    st.header("Claim 1 · Drift predicts loss")
     st.caption(
-        "Baseline-centered mixed-effects model: "
+        "Does accuracy drop as drift grows? — "
         r"$acc\_centered \sim drift\_z \times feature + dataset$, "
         "subject random intercept. Replicates paper Table 1."
     )
 
-    merged = filter_by_dataset(store.merged_df, dataset)
+    about_page(
+        what_you_see=[
+            "Scatter of standardized drift vs baseline-centered accuracy, one OLS line per feature.",
+            "Mixed-effects coefficient table (paper-style) with pseudo-R².",
+            "Forest plot of OLS drift slope across every (feature × classifier × metric) cell, "
+            "with Benjamini-Hochberg FDR correction.",
+        ],
+        how_to_read=[
+            "Negative drift slope ⇒ accuracy drops as drift grows — Claim 1 is supported.",
+            "Colored markers on the forest plot are significant after FDR correction across all cells.",
+        ],
+        paper_ref="§5.2, Table 1",
+        key_terms=[
+            ("drift_z", "standardized drift (chosen in the sidebar)."),
+            ("acc_centered", "accuracy minus subject baseline (session 0, 5-fold CV)."),
+            ("FDR", "Benjamini-Hochberg false-discovery-rate adjusted p across all forest cells."),
+        ],
+    )
+
+    merged = apply_ctx_dataset(store.merged_df)
+    merged = apply_ctx_classifier(merged, ctx)
+    merged = apply_ctx_metric(merged, ctx)
     if merged.empty:
-        st.warning("No merged data.")
+        empty_state(
+            "No merged data for this selection",
+            f"`merged_drift_accuracy_*.csv` is empty under "
+            f"dataset=`{ctx['dataset']}`, classifier=`{ctx['classifier']}`.",
+            dataset=ctx["dataset"],
+        )
         return
 
-    # Classifier filter
-    from utils import (
-        available_classifiers, CLASSIFIER_LABEL,
-        pick_metric_with_drift_z, apply_drift_metric, DISTANCE_LABEL,
-    )
-    clf_opts = available_classifiers(merged)
-    if len(clf_opts) > 1:
-        c1, c2 = st.columns([1, 3])
-        clf_mode = c1.radio("Classifier", ["All pooled"] + clf_opts,
-                             horizontal=True, index=0,
-                             format_func=lambda x: x if x == "All pooled" else CLASSIFIER_LABEL.get(x, x))
-        if clf_mode != "All pooled":
-            merged = merged[merged["classifier"] == clf_mode].copy()
-
-    # Distance-metric selector (redefines drift_z to the chosen metric)
-    metric_opts = pick_metric_with_drift_z(merged)
-    if len(metric_opts) > 1:
-        metric = st.radio(
-            "Drift metric (drift_z)", metric_opts,
-            horizontal=True, index=0,
-            format_func=lambda m: DISTANCE_LABEL.get(m, m),
-        )
-        merged = apply_drift_metric(merged, metric)
-
     # Filter to No-DA only (paper Claim 1 uses No-DA)
-    noda = merged[(merged["strategy"] == "train_once") & (merged["da"] == "none")].copy()
+    noda = merged[(merged["strategy"] == "train_once") &
+                  (merged["da"] == "none")].copy()
     if noda.empty:
-        st.warning("No rows match (strategy=train_once, da=none).")
+        empty_state("No No-DA rows",
+                    "The merged file has no rows with strategy=No DA.")
         return
 
     features = st.multiselect(
         "Features to include",
         sorted(noda["feature"].unique()),
-        default=[f for f in ["CSP", "logvar"] if f in noda["feature"].unique()],
+        default=[f for f in ["CSP", "logvar", "TS"] if f in noda["feature"].unique()],
     )
     if not features:
         st.info("Select at least one feature.")
@@ -104,14 +190,16 @@ def render(store, dataset):
 
     # ── Scatter with linear fits per feature ────────────────────────────────
     with st.container(border=True):
-        st.subheader("Drift vs No-DA accuracy (baseline-centered)")
+        st.subheader(f"Drift vs No-DA accuracy "
+                     f"({DISTANCE_LABEL.get(ctx['metric'], ctx['metric'])})")
         fig = go.Figure()
         for feat, g in noda.groupby("feature"):
-            col = FEATURE_COLORS.get(feat, "#4F46E5")
+            col = fcolors.get(feat, "#4F46E5")
+            opacity = min(0.6, max(0.15, 300 / max(len(g), 1)))
             fig.add_trace(go.Scatter(
                 x=g["drift_z"], y=g["acc_centered"],
                 mode="markers", name=feat,
-                marker=dict(color=col, size=5, opacity=0.4),
+                marker=dict(color=col, size=5, opacity=opacity),
             ))
             if len(g) >= 2:
                 coef = np.polyfit(g["drift_z"], g["acc_centered"], 1)
@@ -123,77 +211,110 @@ def render(store, dataset):
                     name=f"{feat} fit (slope={coef[0]:+.3f})",
                 ))
         fig.update_layout(
-            xaxis_title="drift_z (standardized MMD)",
-            yaxis_title="acc_centered (acc − subject baseline)",
+            xaxis_title="drift (z-score)",
+            yaxis_title="accuracy vs baseline",
             legend=dict(orientation="h", y=-0.15),
         )
         style_figure(fig, height=420)
         st.plotly_chart(fig, use_container_width=True)
+        download_bar("claim1_scatter", noda, "claim1_noda_points")
 
     # ── Fit MixedLM ─────────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("Mixed-effects coefficients")
-        fit = _fit_claim1(noda.to_json(orient="split"))
+        with st.spinner("Fitting mixed-effects model…"):
+            fit = _fit_claim1(noda)
         if "error" in fit:
             st.error(fit["error"])
         else:
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             c1.metric("n observations", f"{fit['n']:,}")
             c2.metric("n subjects", fit["n_subj"])
+            r2m, r2c = fit.get("r2_marginal"), fit.get("r2_conditional")
+            c3.metric("pseudo-R² (marg / cond)",
+                      f"{r2m:.2f} / {r2c:.2f}" if r2m == r2m else "—",
+                      help="Nakagawa marginal (fixed effects) / conditional "
+                           "(incl. subject random intercept).")
             tbl = fit["table"].copy()
-            tbl["sig"] = tbl["p"].apply(
-                lambda p: "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else ""))
-            )
+            tbl["sig"] = tbl["p"].apply(pvalue_badge)
             st.dataframe(
                 tbl.style.format({"coef": "{:+.4f}", "SE": "{:.4f}",
                                   "t": "{:+.2f}", "p": "{:.4g}"}),
                 use_container_width=True, hide_index=True,
             )
             st.caption(
-                "Paper Table 1 (all 3 datasets, both features): "
-                "drift_z β = −0.029 (p<0.001); drift_z × feature[logvar] = +0.034 (p<0.001)."
+                f"Legend: {SIG_LEGEND}.  Paper Table 1 (all 3 datasets, both "
+                "features): drift β = −0.029 (p<0.001); drift × logvar = +0.034 "
+                "(p<0.001).  MixedLM p-values are asymptotic (Z-based) and can be "
+                "anticonservative with few subjects per dataset."
             )
+            download_bar("claim1_mixedlm", tbl, "claim1_mixedlm_coefs")
+
+        # OPT-1: supplementary random-slope model (opt-in, not the published fit)
+        with st.expander("Robustness: random-slope model (supplementary — not the published fit)"):
+            st.caption(
+                "Adds a per-subject random slope for `drift_z` "
+                "(`re_formula='~drift_z'`). This is **not** the model behind "
+                "paper Table 1; it is shown only to gauge sensitivity. "
+                "Convergence is fragile with few subjects."
+            )
+            if st.checkbox("Fit random-slope model", value=False, key="c1_rslope"):
+                with st.spinner("Fitting random-slope model…"):
+                    rs = _fit_random_slope(noda)
+                if "error" in rs:
+                    st.warning(rs["error"])
+                else:
+                    if not rs["converged"]:
+                        st.warning("⚠ Model did not fully converge — interpret with caution.")
+                    rtbl = rs["table"].copy()
+                    rtbl["sig"] = rtbl["p"].apply(pvalue_badge)
+                    st.dataframe(
+                        rtbl.style.format({"coef": "{:+.4f}", "SE": "{:.4f}",
+                                           "p": "{:.4g}"}),
+                        use_container_width=True, hide_index=True,
+                    )
 
     # ── Forest plot: β across all (feature × classifier × metric) cells ────
-    raw = filter_by_dataset(store.merged_df, dataset)
+    raw = apply_ctx_dataset(store.merged_df)
     raw_noda = raw[(raw["strategy"] == "train_once") & (raw["da"] == "none")]
-    from utils import DRIFT_Z_COL, DISTANCE_LABEL, CLASSIFIER_LABEL
-    forest_rows = []
-    for (feat, clf), g in raw_noda.groupby(["feature", "classifier"]):
-        for m_col, z_col in DRIFT_Z_COL.items():
-            if z_col not in g.columns:
-                continue
-            gg = g.dropna(subset=[z_col, "acc_centered"])
-            if len(gg) < 5:
-                continue
-            try:
-                mod = smf.ols(f"acc_centered ~ {z_col}", data=gg).fit()
-                beta = mod.params[z_col]
-                se = mod.bse[z_col]
-                p = mod.pvalues[z_col]
-                ci = mod.conf_int(alpha=0.05).loc[z_col].values
-            except Exception:
-                continue
-            forest_rows.append({
-                "feature": feat, "classifier": clf, "metric": m_col,
-                "metric_label": DISTANCE_LABEL[m_col], "n": len(gg),
-                "beta": beta, "se": se, "lo": ci[0], "hi": ci[1], "p": p,
-            })
+    with st.spinner("Fitting forest-plot cells…"):
+        fdf_full, skipped = _build_forest(raw_noda)
 
-    if forest_rows:
+    if not fdf_full.empty:
         with st.container(border=True):
-            st.subheader("Forest plot — β across (feature × classifier × metric)")
+            st.subheader("Forest plot — slope across (feature × classifier × metric)")
+            n_total = len(fdf_full)
+            n_sig_fdr = int(fdf_full["sig_fdr"].sum())
             st.caption(
-                "Each row is an independent OLS fit on the matching cell. "
-                "Bars show 95% CI; colored markers ≠ gray cross zero."
+                f"Each row is an independent OLS fit. Bars show 95% CI; markers "
+                f"are colored when significant after **Benjamini-Hochberg FDR** "
+                f"across all {n_total} fitted cells "
+                f"({n_sig_fdr}/{n_total} significant)."
+                + (f" {skipped} cell(s) skipped (insufficient data)." if skipped else "")
             )
-            fdf = pd.DataFrame(forest_rows)
+            fdf = fdf_full.copy()
+
+            show_all = st.checkbox(
+                "Show all cells (all classifiers × all metrics)",
+                value=False,
+                help="Uncheck to restrict to the current sidebar classifier and metric. "
+                     "FDR is always computed over ALL cells, not just the shown subset.",
+            )
+            if not show_all:
+                filt = fdf.copy()
+                if ctx["classifier"] != "All pooled":
+                    filt = filt[filt["classifier"] == ctx["classifier"]]
+                filt = filt[filt["metric"] == ctx["metric"]]
+                if not filt.empty:
+                    fdf = filt
+
             sort_mode = st.radio(
-                "Sort by", ["feature → classifier → metric", "β (ascending)",
-                             "classifier → feature → metric"],
+                "Sort by",
+                ["feature → classifier → metric", "slope (ascending)",
+                 "classifier → feature → metric"],
                 horizontal=True,
             )
-            if sort_mode == "β (ascending)":
+            if sort_mode == "slope (ascending)":
                 fdf = fdf.sort_values("beta")
             elif sort_mode.startswith("classifier"):
                 fdf = fdf.sort_values(["classifier", "feature", "metric"])
@@ -205,13 +326,11 @@ def render(store, dataset):
                 + fdf["classifier"].map(lambda x: CLASSIFIER_LABEL.get(x, x)) + " · "
                 + fdf["metric_label"]
             )
-            # Colour non-zero-crossing by feature; gray if CI crosses 0
-            colors = []
-            for _, r in fdf.iterrows():
-                if r["lo"] <= 0 <= r["hi"]:
-                    colors.append("#94A3B8")
-                else:
-                    colors.append(FEATURE_COLORS.get(r["feature"], "#4F46E5"))
+            # Color rule: significant after FDR ⇒ feature color; else grey.
+            colors = [
+                fcolors.get(r["feature"], "#4F46E5") if r["sig_fdr"] else "#94A3B8"
+                for _, r in fdf.iterrows()
+            ]
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=fdf["beta"], y=fdf["label"],
@@ -223,45 +342,52 @@ def render(store, dataset):
                     arrayminus=fdf["beta"] - fdf["lo"],
                     color="rgba(100,116,139,0.6)",
                 ),
-                customdata=np.stack([fdf["n"], fdf["p"]], axis=-1),
+                customdata=np.stack([fdf["n"], fdf["p"], fdf["p_adj"], fdf["R2"]], axis=-1),
                 hovertemplate=(
-                    "%{y}<br>β=%{x:+.4f}<br>"
-                    "n=%{customdata[0]}<br>p=%{customdata[1]:.3g}<extra></extra>"
+                    "%{y}<br>slope=%{x:+.4f}<br>n=%{customdata[0]}<br>"
+                    "p=%{customdata[1]:.3g}<br>p(FDR)=%{customdata[2]:.3g}<br>"
+                    "R²=%{customdata[3]:.3f}<extra></extra>"
                 ),
                 showlegend=False,
             ))
             fig.add_vline(x=0, line_color="#64748B", line_dash="dash")
             fig.update_layout(
-                xaxis_title="β (drift_z slope)",
+                xaxis_title="slope (drift → accuracy)",
                 yaxis_title="",
                 yaxis=dict(autorange="reversed"),
                 height=max(280, 22 * len(fdf) + 100),
             )
             style_figure(fig)
             st.plotly_chart(fig, use_container_width=True)
-            n_sig = int(((fdf["lo"] > 0) | (fdf["hi"] < 0)).sum())
-            st.caption(f"{n_sig}/{len(fdf)} cells have 95% CI excluding zero.")
+            n_sig_shown = int(fdf["sig_fdr"].sum())
+            st.caption(f"{n_sig_shown}/{len(fdf)} shown cells significant at FDR-BH 5%.")
+            download_bar("claim1_forest", fdf, "claim1_forest_cells")
 
     # ── Per-(dataset, feature) slopes ───────────────────────────────────────
     with st.expander("Per (dataset × feature) drift slope"):
         rows = []
+        skipped_pd = 0
         for (ds, feat), g in noda.groupby(["dataset", "feature"]):
             if len(g) < 5:
+                skipped_pd += 1
                 continue
-            slope, intercept = np.polyfit(g["drift_z"], g["acc_centered"], 1)
-            # t-test on slope
+            slope, _ = np.polyfit(g["drift_z"], g["acc_centered"], 1)
             try:
                 mod = smf.ols("acc_centered ~ drift_z", data=g).fit()
                 p = mod.pvalues.get("drift_z", np.nan)
-            except Exception:
-                p = np.nan
-            rows.append({
-                "dataset": ds, "feature": feat,
-                "n": len(g), "slope": slope, "p": p,
-            })
+                r2 = mod.rsquared
+            except Exception as exc:
+                logger.debug("per-(ds,feat) OLS failed for %s/%s: %s", ds, feat, exc)
+                p = r2 = np.nan
+            rows.append({"dataset": ds, "feature": feat,
+                         "n": len(g), "slope": slope, "p": p, "R2": r2})
         if rows:
             df = pd.DataFrame(rows)
+            df["sig"] = df["p"].apply(pvalue_badge)
             st.dataframe(
-                df.style.format({"slope": "{:+.4f}", "p": "{:.4g}"}),
+                df.style.format({"slope": "{:+.4f}", "p": "{:.4g}", "R2": "{:.3f}"}),
                 use_container_width=True, hide_index=True,
             )
+            if skipped_pd:
+                st.caption(f"{skipped_pd} (dataset × feature) group(s) skipped (n<5).")
+            download_bar("claim1_per_ds_feat", df, "claim1_per_dataset_feature")

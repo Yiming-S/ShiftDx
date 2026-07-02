@@ -1,19 +1,96 @@
 # ShiftDx
 
-Drift Diagnostics for Multi-Session MI-EEG BCI.
+<p align="center">
+  <img src="assets/cover.svg" alt="ShiftDx cover: drift trajectory, session heatmap, and adapt-or-retrain decision dashboard" width="100%">
+</p>
 
-An interactive diagnostic dashboard for the paper *Drift Diagnostics, Adaptation,
-and Recalibration in Multi-Session Motor-Imagery EEG* (Shen & Degras, 2026),
-powered by [DA4BCI-Python](https://github.com/Yiming-S/DA4BCI-Python),
-[CrossPython](https://github.com/Yiming-S/CrossPython), and
-[MOABB](https://moabb.neurotechx.com/).
+**Drift Diagnostics & Recalibration Dashboard for multi-session MI-EEG BCI.**
 
-ShiftDx decomposes cross-session non-stationarity in motor-imagery EEG into three
-observable quantities — drift sensitivity, DA benefit, and retraining gap — and
-visualizes them under a **fixed-reference deploy-and-monitor** protocol: the
-feature extractor and classifier are fit on session 0 and applied unchanged to
-every subsequent session, mimicking real-world BCI deployment after a single
-calibration.
+> **ShiftDx is not a feature or DA library** — it is the **diagnostics & decision
+> dashboard** that sits on top of [BCIFeatR](https://github.com/Yiming-S/BCIFeatR) /
+> [CrossPython](https://github.com/Yiming-S/CrossPython) (features) and
+> [DA4BCI](https://github.com/Yiming-S/DA4BCI) (adaptation). It answers the one
+> question a method library can't: *is my deployed BCI drifting across sessions,
+> by how much, and should I adapt or recalibrate?*
+
+An interactive companion to the paper *Drift Diagnostics, Adaptation, and
+Recalibration in Multi-Session Motor-Imagery EEG* (Shen & Degras, 2026). ShiftDx
+runs a **fixed-reference deploy-and-monitor** protocol — the feature extractor and
+classifier are fit on session 0 and applied unchanged to every later session,
+mimicking real-world deployment after a single calibration — and turns it into:
+
+- **testable claims** about cross-session drift (paper §5), backed by
+  **paper-grade statistics**: mixed-effects regression, Benjamini–Hochberg FDR
+  correction, and subject-clustered bootstrap confidence intervals;
+- a concrete **adapt-vs-retrain decision**: how much of the No-DA → Retrain gap a
+  DA method actually closes, and when retraining is unavoidable.
+
+The 10 DA methods, 5 distance metrics, and the online drift detector come from
+[DA4BCI](https://github.com/Yiming-S/DA4BCI) /
+[DA4BCI-Python](https://github.com/Yiming-S/DA4BCI-Python); benchmark datasets
+come from [MOABB](https://moabb.neurotechx.com/). **ShiftDx's own contribution is
+the diagnosis-and-decision layer on top — not the methods.**
+
+## How ShiftDx relates to the toolkit
+
+ShiftDx is the top, interpretive layer of a stack. Raw EEG becomes features
+(BCIFeatR / CrossPython); features are aligned and their shift quantified
+(DA4BCI); ShiftDx turns those results into a drift diagnosis and a recalibration
+decision.
+
+```mermaid
+flowchart BT
+    raw["Raw multi-session EEG"]
+    feat["Representation — features (library)<br/>BCIFeatR (R) · CrossPython (Py)<br/>what features?"]
+    da["Alignment and shift metrics (library)<br/>DA4BCI (R + Python)<br/>align how? how big is the shift?"]
+    dx["ShiftDx — diagnosis and decision (APP)<br/>drifting? adapt or recalibrate?"]
+    viz["Sibling apps — ShiftLens / DA4BCI-Visualizer<br/>teaching: how a method moves toy 2-D points"]
+    raw --> feat --> da --> dx
+    da -. visualized by .-> viz
+    classDef app fill:#EEEDFE,stroke:#534AB7,color:#26215C;
+    classDef lib fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
+    classDef data fill:#F3F4F6,stroke:#9AA0A6,color:#3C4043;
+    classDef teach fill:#F3F4F6,stroke:#9AA0A6,color:#3C4043,stroke-dasharray:4 3;
+    class dx app;
+    class feat,da lib;
+    class raw data;
+    class viz teach;
+```
+
+**Two boundaries to keep straight.**
+
+*Library vs application.* BCIFeatR and DA4BCI are libraries you `import` and call
+from your own pipeline; ShiftDx is an application you open in a browser that
+*interprets* their output. It invents neither features nor DA methods.
+
+| | Type | You… |
+|---|---|---|
+| BCIFeatR · CrossPython · DA4BCI | library | import & call from code |
+| **ShiftDx** | application | open in a browser; it interprets results |
+
+*Diagnosis app vs teaching app.* The apps most easily confused with ShiftDx are
+its siblings ShiftLens / DA4BCI-Visualizer — but they answer a different question:
+
+| App | Job | Data | Audience |
+|---|---|---|---|
+| ShiftLens · DA4BCI-Visualizer | show *how* a DA method works | toy 2-D | learners |
+| **ShiftDx** | measure *how much* drift costs & decide what to do | real multi-session EEG | researchers / deployers |
+
+> The Visualizer shows *how a method works*; ShiftDx shows *how much drift costs
+> you and what to do about it.*
+
+**Naming across the ecosystem.**
+
+- **DA4BCI family** (R · Python · Visualizer) — domain-adaptation *methods and
+  intuition*.
+- **Shift family** — *ShiftLens* = "DA Method Explorer" (teaching);
+  *ShiftDx* = "Drift Diagnostics & Recalibration Dashboard" (empirical).
+
+> **Roadmap / integration.** ShiftDx currently extracts features via CrossPython.
+> [BCIFeatR](https://github.com/Yiming-S/BCIFeatR) is the richer feature library
+> (FBCSP, ACM-TS, ATM, MVAR/MSVAR, bandpower, Hjorth, …); an optional BCIFeatR (R)
+> feature backend for `scripts/build_moabb.py` is planned, which would wire all
+> three repositories into a single stack.
 
 ## What the dashboard shows
 
@@ -106,6 +183,32 @@ pip install -e /path/to/DA4BCI-Python         # enables DA Lab pages + build scr
 export CROSSPYTHON_ROOT=/path/to/CrossPython  # feature / classifier code lives here
 streamlit run app.py
 ```
+
+### Bundled data
+
+Only **zhou2016** and **bnci004** ship as pre-built CSVs in `data/` (small enough
+to track in git). The other datasets in `DATASET_META` (stieger2021, ma2020,
+bnci2015_001) require a local build from MOABB/raw EEG — the dashboard lists them
+with a ❌ status until their CSVs are present and degrades gracefully when a
+selection has no data.
+
+To explore the full UI without MOABB, generate a tiny synthetic dataset:
+
+```bash
+python scripts/gen_synthetic_demo.py   # writes a "demo_synthetic" dataset into data/
+streamlit run app.py
+```
+
+### Metric conventions
+
+- **Accuracy** is a proportion (`0–1`) in tables (`.3f`); it is shown as a
+  percentage only in KPI cards and bar charts.
+- **Drift** is z-scored within `(dataset × feature × classifier)` blocks
+  (`drift_z`); the raw distance is in the `dist_*` columns.
+- **p-values** floor at `p<0.001`; the Claim-1 forest plot additionally reports
+  Benjamini–Hochberg FDR-adjusted p-values across all fitted cells.
+- Confidence intervals on per-subject quantities use a **subject-clustered
+  bootstrap** (subjects are the resampling unit) to respect repeated measures.
 
 ## Build a dataset from MOABB / local CNT
 
