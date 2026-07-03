@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+type: software
+title: "ShiftDx"
+abstract: "An interactive drift-diagnostics dashboard for cross-session motor-imagery EEG, quantifying distribution shift and guiding adapt-versus-retrain decisions."
+authors:
+  - family-names: "Shen"
+    given-names: "Yiming"
+    email: "yiming.shen001@umb.edu"
+    orcid: "https://orcid.org/0009-0004-6282-3755"
+  - family-names: "Degras"
+    given-names: "David"
+    email: "david.degras@umb.edu"
+    orcid: "https://orcid.org/0000-0002-7221-584X"
+version: "0.1.0"
+repository-code: "https://github.com/Yiming-S/ShiftDx"
+url: "https://github.com/Yiming-S/ShiftDx"
+license: MIT
+keywords:
+  - EEG
+  - brain-computer interface
+  - distribution shift
+  - drift diagnostics
+  - dashboard
+  - Streamlit
