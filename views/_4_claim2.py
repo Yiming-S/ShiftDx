@@ -11,9 +11,10 @@ import statsmodels.formula.api as smf
 from utils import (
     DA_LABEL, DA_SHORT_LABEL, DISTANCE_LABEL,
     SIG_LEGEND, about_page, apply_ctx_classifier, apply_ctx_dataset,
-    apply_ctx_metric, available_da_methods, cluster_bootstrap_ci, da_colors,
-    download_bar, empty_state, feature_colors, get_ctx, is_retrain,
-    mixedlm_pseudo_r2, pvalue_badge, style_figure,
+    apply_ctx_metric, available_da_methods, build_claim_formula,
+    cluster_bootstrap_ci, da_colors, download_bar, empty_state, feature_colors,
+    fit_lmm_or_fallback, get_ctx, is_retrain, mixedlm_pseudo_r2, pvalue_badge,
+    style_figure,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,22 +22,28 @@ logger = logging.getLogger(__name__)
 
 @st.cache_data(show_spinner=False)
 def _fit_claim2(df: pd.DataFrame) -> dict:
-    """Interaction MixedLM (paper Table 2). Cached on the DataFrame directly;
-    formula and fit method unchanged from the published analysis."""
+    """Interaction MixedLM (paper Table 2). Robust to degenerate slices: drops
+    single-level factors, reports a no-variance drift slice clearly, and falls
+    back to OLS with subject-cluster-robust SEs if the mixed fit is singular."""
     if df.empty or df["subject"].nunique() < 2:
-        return {"error": "Not enough groups."}
+        return {"error": "Not enough subjects in this slice (need at least 2)."}
     df = df.copy()
-    df["feature"] = df["feature"].astype("category")
-    df["dataset"] = df["dataset"].astype("category")
     df["subject_tag"] = df["dataset"].astype(str) + "_" + df["subject"].astype(str)
+    d = df.dropna(subset=["drift_z", "acc_centered"])
+    if len(d) < 3 or d["subject_tag"].nunique() < 2 or d["has_da"].nunique() < 2:
+        return {"error": "Not enough usable rows (need both No-DA and DA rows "
+                         "with drift_z / acc_centered)."}
+    if float(d["drift_z"].std(ddof=1)) < 1e-8:
+        return {"error": "Drift has essentially no variation in this slice, so the "
+                         "drift × DA interaction cannot be estimated. Widen the "
+                         "selection or pick a different drift metric."}
+
+    formula = build_claim_formula(d, "acc_centered", interact_da=True)
     try:
-        model = smf.mixedlm(
-            "acc_centered ~ drift_z * has_da * C(feature) + C(dataset)",
-            data=df, groups=df["subject_tag"],
-        )
-        result = model.fit(method="lbfgs", disp=False)
+        result, method, is_mixed = fit_lmm_or_fallback(d, formula, "subject_tag")
     except Exception as exc:
-        return {"error": f"Fit failed: {exc}"}
+        return {"error": f"Model fit failed: {exc}"}
+
     tbl = pd.DataFrame({
         "term": result.params.index,
         "coef": result.params.values,
@@ -44,10 +51,13 @@ def _fit_claim2(df: pd.DataFrame) -> dict:
         "t": result.tvalues.values,
         "p": result.pvalues.values,
     })
-    r2m, r2c = mixedlm_pseudo_r2(result)
-    return {"table": tbl, "n": int(len(df)),
-            "n_subj": int(df["subject_tag"].nunique()),
-            "r2_marginal": r2m, "r2_conditional": r2c}
+    tbl = tbl[~tbl["term"].astype(str).str.contains("Var|Group", na=False)]
+    r2m, r2c = (mixedlm_pseudo_r2(result) if is_mixed
+                else (float(getattr(result, "rsquared", np.nan)), np.nan))
+    return {"table": tbl, "n": int(len(d)),
+            "n_subj": int(d["subject_tag"].nunique()),
+            "r2_marginal": r2m, "r2_conditional": r2c,
+            "method": method, "is_mixed": is_mixed}
 
 
 @st.cache_data(show_spinner=False)
@@ -269,8 +279,12 @@ def render(store):
         with st.spinner("Fitting interaction model…"):
             fit = _fit_claim2(pooled)
         if "error" in fit:
-            st.error(fit["error"])
+            st.info(fit["error"])
         else:
+            if not fit.get("is_mixed", True):
+                st.warning(f"⚠ Estimator fell back to **{fit['method']}** — the "
+                           "mixed model was rank-deficient on this slice. Point "
+                           "estimates are still valid.")
             c1, c2, c3 = st.columns(3)
             c1.metric("n observations", f"{fit['n']:,}")
             c2.metric("n subjects", fit["n_subj"])

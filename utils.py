@@ -878,6 +878,42 @@ def mixedlm_pseudo_r2(result) -> tuple[float, float]:
         return (np.nan, np.nan)
 
 
+def build_claim_formula(df: pd.DataFrame, response: str, interact_da: bool = False):
+    """Build a claim-page mixed-model formula that only includes factors with
+    ≥2 levels in the current slice — this prevents rank-deficient (singular)
+    designs when the user filters to a single dataset/feature. `df` is mutated so
+    the referenced categoricals have the `category` dtype."""
+    core = "drift_z * has_da" if interact_da else "drift_z"
+    if df["feature"].nunique() >= 2:
+        df["feature"] = df["feature"].astype("category")
+        core = f"({core}) * C(feature)" if interact_da else f"{core} * C(feature)"
+    if df["dataset"].nunique() >= 2:
+        df["dataset"] = df["dataset"].astype("category")
+        core = f"{core} + C(dataset)"
+    return f"{response} ~ {core}"
+
+
+def fit_lmm_or_fallback(df: pd.DataFrame, formula: str, group_col: str):
+    """Fit a linear mixed model (subject random intercept). If the design is
+    rank-deficient (singular matrix / non-finite SEs), fall back to OLS with
+    cluster-robust standard errors grouped by subject — the fixed-effect
+    estimates stay interpretable and clustering still respects repeated measures.
+
+    Returns (result, method_label, is_mixed). Raises on total failure.
+    """
+    import statsmodels.formula.api as smf
+    try:
+        res = smf.mixedlm(formula, data=df, groups=df[group_col]).fit(
+            method="lbfgs", disp=False)
+        if not np.all(np.isfinite(np.asarray(res.bse, dtype=float))):
+            raise np.linalg.LinAlgError("non-finite standard errors")
+        return res, "MixedLM (subject random intercept)", True
+    except Exception:
+        res = smf.ols(formula, data=df).fit(
+            cov_type="cluster", cov_kwds={"groups": df[group_col]})
+        return res, "OLS + subject-cluster-robust SE (mixed model was singular)", False
+
+
 def benjamini_hochberg(pvals) -> np.ndarray:
     """BH-FDR adjusted p-values. Uses statsmodels when available, else a
     self-contained implementation. NaNs pass through as NaN."""

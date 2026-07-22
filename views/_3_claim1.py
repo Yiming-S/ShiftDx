@@ -11,8 +11,9 @@ import statsmodels.formula.api as smf
 from utils import (
     CLASSIFIER_LABEL, DISTANCE_LABEL, DRIFT_Z_COL,
     SIG_LEGEND, about_page, apply_ctx_classifier, apply_ctx_dataset,
-    apply_ctx_metric, benjamini_hochberg, download_bar, empty_state,
-    feature_colors, get_ctx, mixedlm_pseudo_r2, pvalue_badge, style_figure,
+    apply_ctx_metric, benjamini_hochberg, build_claim_formula, download_bar,
+    empty_state, feature_colors, fit_lmm_or_fallback, get_ctx,
+    mixedlm_pseudo_r2, pvalue_badge, style_figure,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,26 +23,35 @@ logger = logging.getLogger(__name__)
 def _fit_claim1(df: pd.DataFrame) -> dict:
     """Fit the baseline-centered mixed-effects model from the paper (Table 1).
 
-    Cached directly on the DataFrame (Streamlit hashes it natively). The model
-    formula and fit method are unchanged from the published analysis.
+    Cached directly on the DataFrame (Streamlit hashes it natively). Robust to
+    degenerate slices: single-level factors are dropped from the formula, a
+    no-variance drift slice is reported clearly, and a rank-deficient (singular)
+    mixed fit falls back to OLS with subject-cluster-robust SEs.
     """
     if df.empty or df["subject"].nunique() < 2:
-        return {"error": "Not enough groups to fit mixed-effects model."}
+        return {"error": "Not enough subjects in this slice to fit the model "
+                         "(need at least 2). Widen the dataset / classifier filter."}
     df = df.copy()
-    df["feature"] = df["feature"].astype("category")
-    df["dataset"] = df["dataset"].astype("category")
     df["subject_tag"] = df["dataset"].astype(str) + "_" + df["subject"].astype(str)
+    d = df.dropna(subset=["drift_z", "acc_centered"])
+    if len(d) < 3 or d["subject_tag"].nunique() < 2:
+        return {"error": "Not enough usable rows after dropping missing "
+                         "drift_z / acc_centered."}
+    if float(d["drift_z"].std(ddof=1)) < 1e-8:
+        return {"error": "Drift has essentially no variation in this slice, so a "
+                         "drift slope cannot be estimated. Pick a slice with more "
+                         "sessions/subjects or a different drift metric."}
+
+    formula = build_claim_formula(d, "acc_centered", interact_da=False)
     try:
-        model = smf.mixedlm(
-            "acc_centered ~ drift_z * C(feature) + C(dataset)",
-            data=df, groups=df["subject_tag"],
-        )
-        result = model.fit(method="lbfgs", disp=False)
+        result, method, is_mixed = fit_lmm_or_fallback(d, formula, "subject_tag")
     except Exception as exc:
-        return {"error": f"MixedLM fit failed: {exc}"}
+        return {"error": f"Model fit failed: {exc}"}
 
     rows = []
     for k in result.params.index:
+        if str(k).endswith("Var") or "Group" in str(k):
+            continue  # hide the random-effect variance row
         rows.append({
             "term": k,
             "coef": result.params[k],
@@ -49,13 +59,16 @@ def _fit_claim1(df: pd.DataFrame) -> dict:
             "t": result.tvalues.get(k, np.nan),
             "p": result.pvalues.get(k, np.nan),
         })
-    r2m, r2c = mixedlm_pseudo_r2(result)
+    r2m, r2c = (mixedlm_pseudo_r2(result) if is_mixed
+                else (float(getattr(result, "rsquared", np.nan)), np.nan))
     return {
         "table": pd.DataFrame(rows),
-        "n": int(len(df)),
-        "n_subj": int(df["subject_tag"].nunique()),
+        "n": int(len(d)),
+        "n_subj": int(d["subject_tag"].nunique()),
         "r2_marginal": r2m,
         "r2_conditional": r2c,
+        "method": method,
+        "is_mixed": is_mixed,
     }
 
 
@@ -225,8 +238,13 @@ def render(store):
         with st.spinner("Fitting mixed-effects model…"):
             fit = _fit_claim1(noda)
         if "error" in fit:
-            st.error(fit["error"])
+            st.info(fit["error"])
         else:
+            if not fit.get("is_mixed", True):
+                st.warning(f"⚠ Estimator fell back to **{fit['method']}** — the "
+                           "mixed model was rank-deficient on this slice "
+                           "(e.g. near-constant drift). Point estimates are still "
+                           "valid; interpret with the wider selection in mind.")
             c1, c2, c3 = st.columns(3)
             c1.metric("n observations", f"{fit['n']:,}")
             c2.metric("n subjects", fit["n_subj"])
