@@ -85,6 +85,7 @@ def render(store):
 
     method = st.selectbox(
         "DA method", _SANDBOX_METHODS,
+        index=_SANDBOX_METHODS.index("coral"),
         format_func=lambda m: DA_LABEL.get(m, m),
         help="M3D is excluded here because it needs class labels, which the "
              "synthetic shift does not provide.",
@@ -196,7 +197,6 @@ def render(store):
         fig = go.Figure()
         pca_before = PCA(n_components=2).fit(np.vstack([source, target]))
         s_b = pca_before.transform(source); t_b = pca_before.transform(target)
-        s_a = pca_before.transform(src_adapted)
 
         fig.add_trace(go.Scatter(
             x=s_b[:, 0], y=s_b[:, 1], mode="markers",
@@ -208,11 +208,21 @@ def render(store):
             marker=dict(color="#F59E0B", size=5, opacity=0.5, symbol="x"),
             name="target",
         ))
-        fig.add_trace(go.Scatter(
-            x=s_a[:, 0], y=s_a[:, 1], mode="markers",
-            marker=dict(color="#4F46E5", size=5, opacity=0.7),
-            name="source (after)",
-        ))
+        # Subspace methods (SA/TCA/MIDA) return a k-D adapted source (k < d), which
+        # cannot be projected through the original d-D PCA. Only overlay when dims match.
+        if np.asarray(src_adapted).shape[1] == source.shape[1]:
+            s_a = pca_before.transform(src_adapted)
+            fig.add_trace(go.Scatter(
+                x=s_a[:, 0], y=s_a[:, 1], mode="markers",
+                marker=dict(color="#4F46E5", size=5, opacity=0.7),
+                name="source (after)",
+            ))
+        else:
+            st.caption(
+                f"{cache['method'].upper()} maps the source into a "
+                f"{np.asarray(src_adapted).shape[1]}-D subspace, so the adapted points "
+                "are not overlaid in the original feature space."
+            )
         fig.update_layout(
             xaxis_title="PC1", yaxis_title="PC2",
             legend=dict(orientation="h", y=-0.15),
