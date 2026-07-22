@@ -195,34 +195,43 @@ def render(store):
     with st.container(border=True):
         st.subheader("PCA scatter (2-D)")
         fig = go.Figure()
-        pca_before = PCA(n_components=2).fit(np.vstack([source, target]))
-        s_b = pca_before.transform(source); t_b = pca_before.transform(target)
+        src_a = np.asarray(src_adapted); tgt_a = np.asarray(tgt_adapted)
+        if src_a.shape[1] == source.shape[1]:
+            # Dimension-preserving DA (CORAL/PT/GFK/RD/ART/OT): source (before),
+            # target, and source (after) are all comparable in the original space.
+            pca = PCA(n_components=2).fit(np.vstack([source, target]))
+            s_b = pca.transform(source); t_pts = pca.transform(target)
+            s_a = pca.transform(src_a)
+            space_note = "2-D PCA of the original feature space — watch the source (after) move onto the target."
+            show_before = True
+        else:
+            # Subspace DA (SA/TCA/MIDA) maps BOTH domains into a shared k-D subspace,
+            # so the alignment is only meaningful there. The pre-DA cloud lives in a
+            # different space, so we compare the adapted source and target in the subspace.
+            pca = PCA(n_components=2).fit(np.vstack([src_a, tgt_a]))
+            t_pts = pca.transform(tgt_a); s_a = pca.transform(src_a)
+            space_note = (f"2-D PCA of the {src_a.shape[1]}-D aligned subspace that "
+                          f"{cache['method'].upper()} maps both domains into (the pre-DA cloud "
+                          "lives in a different space and is omitted).")
+            show_before = False
 
+        if show_before:
+            fig.add_trace(go.Scatter(
+                x=s_b[:, 0], y=s_b[:, 1], mode="markers",
+                marker=dict(color="#94A3B8", size=5, opacity=0.5),
+                name="source (before)",
+            ))
         fig.add_trace(go.Scatter(
-            x=s_b[:, 0], y=s_b[:, 1], mode="markers",
-            marker=dict(color="#94A3B8", size=5, opacity=0.5),
-            name="source (before)",
-        ))
-        fig.add_trace(go.Scatter(
-            x=t_b[:, 0], y=t_b[:, 1], mode="markers",
+            x=t_pts[:, 0], y=t_pts[:, 1], mode="markers",
             marker=dict(color="#F59E0B", size=5, opacity=0.5, symbol="x"),
             name="target",
         ))
-        # Subspace methods (SA/TCA/MIDA) return a k-D adapted source (k < d), which
-        # cannot be projected through the original d-D PCA. Only overlay when dims match.
-        if np.asarray(src_adapted).shape[1] == source.shape[1]:
-            s_a = pca_before.transform(src_adapted)
-            fig.add_trace(go.Scatter(
-                x=s_a[:, 0], y=s_a[:, 1], mode="markers",
-                marker=dict(color="#4F46E5", size=5, opacity=0.7),
-                name="source (after)",
-            ))
-        else:
-            st.caption(
-                f"{cache['method'].upper()} maps the source into a "
-                f"{np.asarray(src_adapted).shape[1]}-D subspace, so the adapted points "
-                "are not overlaid in the original feature space."
-            )
+        fig.add_trace(go.Scatter(
+            x=s_a[:, 0], y=s_a[:, 1], mode="markers",
+            marker=dict(color="#4F46E5", size=5, opacity=0.7),
+            name="source (after)",
+        ))
+        st.caption(space_note)
         fig.update_layout(
             xaxis_title="PC1", yaxis_title="PC2",
             legend=dict(orientation="h", y=-0.15),
