@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>ShiftDx — cross-session EEG drift diagnostics</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/browser@1.8.1/build/stlite.css"/>
+  <style>
+  #splash{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(135deg,#F8FAFC 0%,#EEF2FF 100%);transition:opacity .6s ease;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#1E293B}
+  #splash.hide{opacity:0;pointer-events:none}
+  #splash .card{max-width:440px;padding:0 32px;text-align:center}
+  #splash .dot{width:14px;height:14px;border-radius:50%;background:#4F46E5;display:inline-block;margin:0 auto 22px;
+    box-shadow:0 0 0 0 rgba(79,70,229,.5);animation:pulse 1.4s ease-out infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(79,70,229,.45)}70%{box-shadow:0 0 0 22px rgba(79,70,229,0)}100%{box-shadow:0 0 0 0 rgba(79,70,229,0)}}
+  #splash h1{font-size:30px;font-weight:700;margin:0 0 8px;letter-spacing:-.01em}
+  #splash .tag{font-size:15px;color:#475569;margin:0 0 26px;line-height:1.5}
+  #splash .bar{height:5px;border-radius:99px;background:#E2E8F0;overflow:hidden;margin:0 auto 16px;max-width:280px}
+  #splash .bar>i{display:block;height:100%;width:40%;border-radius:99px;background:linear-gradient(90deg,#6366F1,#4F46E5);animation:slide 1.3s ease-in-out infinite}
+  @keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
+  #splash .note{font-size:12.5px;color:#94A3B8;margin:0;line-height:1.6}
+  @media (prefers-reduced-motion:reduce){#splash .dot,#splash .bar>i{animation:none}#splash .bar>i{width:100%}}
+</style>
+</head>
+<body>
+
+  <div id="splash"><div class="card">
+    <span class="dot"></span>
+    <h1>ShiftDx</h1>
+    <p class="tag">Decoder-stability &amp; drift diagnostics for multi-session motor-imagery EEG</p>
+    <div class="bar"><i></i></div>
+    <p class="note">Running entirely in your browser. The first visit loads the Python runtime once&nbsp;&mdash; after that it&rsquo;s instant.</p>
+  </div></div>
+
+  <div id="root"></div>
+  <script type="module">
+    import { mount } from "https://cdn.jsdelivr.net/npm/@stlite/browser@1.8.1/build/stlite.js";
+    const files = {
+      ".streamlit/config.toml": {
+            "url": "./.streamlit/config.toml"
+      },
+      "app.py": {
+            "url": "./app.py"
+      },
+      "assets/cover.svg": {
+            "url": "./assets/cover.svg"
+      },
+      "data_loader.py": {
+            "url": "./data_loader.py"
+      },
+      "file.svg": {
+            "url": "./file.svg"
+      },
+      "monitor.py": {
+            "url": "./monitor.py"
+      },
+      "requirements.txt": {
+            "url": "./requirements.txt"
+      },
+      "runtime.txt": {
+            "url": "./runtime.txt"
+      },
+      "utils.py": {
+            "url": "./utils.py"
+      },
+      "views/_10_sweep.py": {
+            "url": "./views/_10_sweep.py"
+      },
+      "views/_11_detection.py": {
+            "url": "./views/_11_detection.py"
+      },
+      "views/_12_da_leaderboard.py": {
+            "url": "./views/_12_da_leaderboard.py"
+      },
+      "views/_13_global_report.py": {
+            "url": "./views/_13_global_report.py"
+      },
+      "views/_14_data_quality.py": {
+            "url": "./views/_14_data_quality.py"
+      },
+      "views/_1_overview.py": {
+            "url": "./views/_1_overview.py"
+      },
+      "views/_2_drift_trajectory.py": {
+            "url": "./views/_2_drift_trajectory.py"
+      },
+      "views/_3_claim1.py": {
+            "url": "./views/_3_claim1.py"
+      },
+      "views/_4_claim2.py": {
+            "url": "./views/_4_claim2.py"
+      },
+      "views/_5_claim3.py": {
+            "url": "./views/_5_claim3.py"
+      },
+      "views/_6_claim4.py": {
+            "url": "./views/_6_claim4.py"
+      },
+      "views/_7_subject.py": {
+            "url": "./views/_7_subject.py"
+      },
+      "views/_8_live_da.py": {
+            "url": "./views/_8_live_da.py"
+      },
+      "views/_9_multi_metric.py": {
+            "url": "./views/_9_multi_metric.py"
+      },
+      "views/__init__.py": {
+            "url": "./views/__init__.py"
+      }
+};
+    const wheelUrl = new URL("./da4bci-0.1.1-py3-none-any.whl", document.baseURI).href;   // same-origin absolute (local + gh-pages)
+    mount({
+      entrypoint: "app.py",
+      requirements: ["pandas","numpy","scipy","scikit-learn","statsmodels","matplotlib","plotly", wheelUrl],
+      archives: [{ url: "./data.zip", format: "zip" }],
+      files: files,
+    }, document.getElementById("root"));
+    const splash=document.getElementById('splash');
+    let hidden=false;
+    const hide=()=>{if(hidden)return;hidden=true;splash.classList.add('hide');setTimeout(()=>splash.remove(),700);};
+    const ready=()=>{
+      const main=document.querySelector('[data-testid="stMain"], section.main, .stMain');
+      if(document.querySelector('[data-testid="stException"], .stException')) return true;
+      return !!(main && main.innerText && main.innerText.trim().length>40);
+    };
+    new MutationObserver(()=>{if(ready())hide();}).observe(document.body,{childList:true,subtree:true,characterData:true});
+    const iv=setInterval(()=>{if(ready()){hide();clearInterval(iv);}},400);
+    setTimeout(hide,200000);
+  </script>
+</body>
+</html>
