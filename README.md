@@ -6,6 +6,8 @@
 
 **Drift Diagnostics & Recalibration Dashboard for multi-session MI-EEG BCI.**
 
+**▶ Live demo — runs entirely in your browser, nothing to install:** https://yiming-s.github.io/ShiftDx/
+
 > **ShiftDx is not a feature or DA library** — it is the **diagnostics & decision
 > dashboard** that sits on top of [BCIFeatR](https://github.com/Yiming-S/BCIFeatR) /
 > [CrossPython](https://github.com/Yiming-S/CrossPython) (features) and
